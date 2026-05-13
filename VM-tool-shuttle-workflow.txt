@@ -1,0 +1,381 @@
+
+VM Tool Shuttle Workflow
+========================
+
+Purpose
+-------
+Design and maintain a portable AMD64/x86_64 virtual machine workflow that:
+
+- Runs natively on a Debian Linux virtualization host
+- Can be exported/imported into VMware ESXi
+- Uses portable virtual hardware and disk formats
+- Supports future backup and archival workflows
+- Minimizes hypervisor lock-in
+
+Recommended Virtualization Stack
+--------------------------------
+
+Primary Hypervisor Platform on Debian:
+- QEMU
+- KVM
+- libvirt
+- virt-manager
+
+Reasoning:
+- Linux-native
+- Enterprise-proven
+- Excellent ESXi interoperability
+- Strong tooling ecosystem
+- Easy disk conversion workflows
+
+Avoid:
+- Building the primary VM in VirtualBox
+- Hypervisor-specific guest additions
+- Experimental virtual hardware
+
+Target Architecture
+-------------------
+
+Debian Host
+    ↓
+KVM/QEMU Virtual Machine
+    ↓
+Portable Disk Format (qcow2)
+    ↓
+Convert to VMware VMDK
+    ↓
+Import into VMware ESXi
+
+Recommended VM Design Standards
+--------------------------------
+
+Firmware:
+- Use UEFI only
+- OVMF firmware under KVM
+- Avoid legacy BIOS
+
+Machine Type:
+- q35
+
+CPU:
+- host-model or conservative x86_64 model
+- Avoid exotic CPU flags
+
+Disk Bus:
+- VirtIO
+
+Network Adapter:
+- VirtIO
+
+Disk Partitioning:
+- GPT partition table
+
+Guest Filesystem:
+- ext4 or XFS
+
+Recommended Guest Operating Systems
+-----------------------------------
+
+Best portability:
+- Debian
+- Ubuntu Server
+- Rocky Linux
+- AlmaLinux
+
+Debian Host Setup
+-----------------
+
+Install virtualization packages:
+
+sudo apt update
+
+sudo apt install qemu-kvm \
+libvirt-daemon-system \
+virt-manager \
+ovmf \
+bridge-utils \
+qemu-utils
+
+Verify virtualization support:
+
+egrep -c '(vmx|svm)' /proc/cpuinfo
+
+Optional:
+
+kvm-ok
+
+Networking Recommendation
+-------------------------
+
+Use Linux bridge networking instead of NAT.
+
+Example bridge:
+- br0
+
+Advantages:
+- Cleaner ESXi migration
+- Better network portability
+- Easier server-style deployment
+
+Creating the Virtual Machine
+----------------------------
+
+Use:
+- virt-manager
+
+Recommended configuration:
+
+Firmware:
+- UEFI (OVMF)
+
+Machine Type:
+- q35
+
+Disk Format:
+- qcow2
+
+Disk Bus:
+- VirtIO
+
+NIC:
+- VirtIO
+
+Graphics:
+- SPICE
+
+Suggested Resource Allocation
+-----------------------------
+
+vCPU:
+- 2 to 4
+
+RAM:
+- 4GB to 8GB
+
+Disk:
+- 40GB to 100GB
+
+Guest Integration Packages
+--------------------------
+
+Inside the guest OS install:
+
+sudo apt install qemu-guest-agent open-vm-tools
+
+Purpose:
+- Better KVM integration
+- Better VMware ESXi integration
+- Avoid reinstalling guest tooling later
+
+Storage Format Strategy
+-----------------------
+
+Active KVM Usage:
+- qcow2
+
+VMware Migration:
+- VMDK
+
+Portable Appliance Packaging:
+- OVF/OVA (optional)
+
+Conversion Workflow
+-------------------
+
+The preferred workflow is:
+
+qcow2
+    ↓
+VMDK
+    ↓
+Attach to ESXi VM
+
+Tools Required
+--------------
+
+Disk Conversion:
+- qemu-img
+
+Migration Optimization:
+- virt-v2v
+
+VMware Packaging:
+- VMware OVF Tool
+
+VMware Automation:
+- govc
+
+qcow2 to VMDK Conversion
+------------------------
+
+Install conversion tools:
+
+sudo apt install qemu-utils
+
+Convert qcow2 to VMDK:
+
+qemu-img convert -f qcow2 \
+-O vmdk source.qcow2 target.vmdk
+
+This creates:
+- VMware-compatible VMDK disks
+
+Recommended ESXi Import Workflow
+--------------------------------
+
+Preferred Method:
+1. Convert qcow2 to VMDK
+2. Upload VMDK to ESXi datastore
+3. Create a new empty VM in ESXi
+4. Match virtual hardware:
+   - UEFI
+   - q35
+   - Similar CPU/RAM
+5. Attach existing VMDK
+
+Advantages:
+- Simplest workflow
+- Fewer compatibility problems
+- Easier troubleshooting
+- Avoids OVF metadata issues
+
+OVF/OVA Packaging
+-----------------
+
+OVF/OVA is optional.
+
+Use cases:
+- VM appliance distribution
+- Versioned VM templates
+- Automated deployment pipelines
+- vCenter appliance workflows
+
+Recommended Tool:
+- VMware OVF Tool
+
+Official download:
+https://developer.broadcom.com/tools/open-virtualization-format-ovf-tool/latest
+
+Example:
+ovftool source.ovf target.ova
+
+Linux Native Migration Tool
+---------------------------
+
+Tool:
+- virt-v2v
+
+Install:
+sudo apt install virt-v2v
+
+Example:
+virt-v2v -i disk vm.qcow2 -o local -of vmdk
+
+Capabilities:
+- Hypervisor migration
+- Driver injection
+- VMware optimization
+- Guest compatibility improvements
+
+VMware Automation Tool
+----------------------
+
+Tool:
+- govc
+
+GitHub:
+https://github.com/vmware/govmomi/tree/master/govc
+
+Use cases:
+- ESXi automation
+- Datastore uploads
+- VM provisioning scripts
+- CI/CD integration
+
+Recommended Directory Structure
+--------------------------------
+
+vm-project/
+├── vm.qcow2
+├── vm.vmdk
+├── vm.ovf
+├── checksums/
+├── backups/
+└── cloud-init/
+
+Cloud-Init Recommendation
+-------------------------
+
+Install cloud-init in Linux guests.
+
+Benefits:
+- Easier cloning
+- Automated provisioning
+- Better portability
+- Faster deployment workflows
+
+Avoid These Features Initially
+------------------------------
+
+Do not use:
+- GPU passthrough
+- PCIe passthrough
+- SR-IOV
+- Exotic virtual devices
+- Hypervisor-specific hardware features
+
+Reason:
+- Reduces portability
+- Complicates migration
+- Increases troubleshooting complexity
+
+Backup Recommendations
+----------------------
+
+Store on NAS/QNAP:
+- qcow2 master image
+- Converted VMDK
+- VM configuration XML
+- Checksums
+- Export metadata
+
+Suggested backup targets:
+- SMB
+- NFS
+- Immutable backup storage
+- Offline archive
+
+Recommended Final Architecture
+-------------------------------
+
+Debian Host
+    ↓
+KVM/QEMU VM
+    ↓
+qcow2 master image
+    ↓
+qemu-img conversion
+    ↓
+VMDK
+    ↓
+ESXi datastore import
+
+Summary
+-------
+
+Best overall workflow:
+
+1. Build VM on Debian using KVM/QEMU
+2. Use conservative portable hardware settings
+3. Store master disk as qcow2
+4. Convert to VMDK using qemu-img
+5. Import manually into ESXi
+6. Use OVF/OVA only when appliance packaging is needed
+
+This provides:
+- Maximum portability
+- Linux-native management
+- ESXi compatibility
+- Easier backups
+- Lower operational complexity
+- Long-term maintainability

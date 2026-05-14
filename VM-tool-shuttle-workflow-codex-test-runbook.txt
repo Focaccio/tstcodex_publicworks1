@@ -1,0 +1,418 @@
+VM TOOL SHUTTLE WORKFLOW - CODEX TEST RUNBOOK
+=============================================
+
+Purpose
+-------
+Use this runbook when asking Codex to create a small test VM on the local
+kg55 Debian/KVM system, prepare it for portability, convert it from qcow2 to
+VMDK, and produce an evidence bundle for transfer/import testing on a remote
+VMware ESXi system.
+
+This is a lab workflow. Do not touch production VMs. Do not overwrite existing
+VM disks. Stop and report if any required host, network, storage, or credential
+detail is missing.
+
+
+Expected Operator Prompt
+------------------------
+Paste or reference this runbook, then ask:
+
+  Create a small test VM using this VM Tool Shuttle workflow. Build it on kg55,
+  prepare it for transfer to my remote ESXi system, convert the powered-off VM
+  disk to VMDK, and leave me an evidence bundle with commands, outputs,
+  checksums, and next-step import instructions. Stop before contacting ESXi
+  unless I provide the ESXi host and credentials.
+
+
+Default Test VM Values
+----------------------
+VM_NAME: vm-shuttle-test01
+GUEST_OS: Debian stable minimal server
+ARCH: amd64 / x86_64
+FIRMWARE: UEFI / OVMF
+MACHINE_TYPE: q35
+VCPU: 2
+RAM_MB: 4096
+DISK_GB: 20
+DISK_FORMAT_SOURCE: qcow2
+DISK_FORMAT_EXPORT: vmdk
+DISK_BUS_ON_KVM: virtio
+NETWORK_ON_KVM: virtio
+NETWORK_MODE: bridge br0 preferred; NAT acceptable for first local toolchain test
+PARTITION_TABLE: GPT
+FILESYSTEM: ext4
+SOURCE_HOST_LABEL: kg55
+ESXI_IMPORT_MODE: manual first, automation later
+
+
+Required Inputs To Confirm Before Acting
+----------------------------------------
+Codex must collect or infer these values before creating anything:
+
+1. Debian/KVM host access path.
+   Example: local shell on kg55, SSH to kg55, or an already-open terminal.
+
+2. ISO or cloud image source.
+   Example: /srv/isos/debian-*.iso or a Debian cloud image URL/path.
+
+3. VM storage location.
+   Example: /var/lib/libvirt/images or /srv/vms.
+
+4. Network choice.
+   Preferred: bridge br0.
+   Fallback: libvirt default NAT network.
+
+5. Transfer target policy.
+   For this test, produce local artifacts first. Do not contact ESXi unless
+   the operator explicitly supplies ESXi host, datastore, and credentials.
+
+
+Hard Stop Conditions
+--------------------
+Stop and report before making changes if any of these are true:
+
+- CPU virtualization support is absent.
+- libvirt/KVM commands are unavailable.
+- OVMF/UEFI firmware is unavailable.
+- Disk free space is less than DISK_GB plus 2x export working room.
+- The chosen VM_NAME already exists and the operator has not approved reuse.
+- The target VM disk path already exists and the operator has not approved reuse.
+- No ISO/cloud image source is available.
+- The selected network bridge does not exist and NAT fallback is not acceptable.
+- Any command would modify an unrelated existing VM.
+- ESXi contact, upload, or import is requested but ESXi credentials are missing.
+
+
+Phase 0 - Create Working Directories
+------------------------------------
+Recommended layout:
+
+  /srv/vms/vm-shuttle-test01/
+    vm-shuttle-test01.qcow2
+    vm-shuttle-test01-libvirt.xml
+    logs/
+    exports/
+      YYYYMMDD-HHMM/
+        vm-shuttle-test01.qcow2
+        vm-shuttle-test01.vmdk
+        qcow2-info.txt
+        vmdk-info.txt
+        SHA256SUMS
+        commands.log
+        notes.md
+
+Commands, adjust BASE_DIR if needed:
+
+  VM_NAME=vm-shuttle-test01
+  BASE_DIR=/srv/vms/${VM_NAME}
+  RUN_ID=$(date +%Y%m%d-%H%M)
+  EXPORT_DIR=${BASE_DIR}/exports/${RUN_ID}
+  sudo mkdir -p "${BASE_DIR}/logs" "${EXPORT_DIR}"
+  sudo chown -R "$USER":"$USER" "${BASE_DIR}"
+
+
+Phase 1 - Host Preflight
+------------------------
+Run:
+
+  hostnamectl
+  uname -a
+  egrep -c '(vmx|svm)' /proc/cpuinfo
+  command -v virsh
+  command -v virt-install
+  command -v qemu-img
+  systemctl status libvirtd --no-pager
+  virsh list --all
+  virsh net-list --all
+  ls /usr/share/OVMF /usr/share/ovmf 2>/dev/null || true
+  df -h /srv /var/lib/libvirt/images "$HOME" 2>/dev/null
+
+Pass criteria:
+
+- virtualization count is 1 or greater
+- virsh, virt-install, and qemu-img exist
+- libvirt is active or socket-activated
+- OVMF firmware files exist
+- enough disk space exists for qcow2 plus exported copy plus VMDK
+
+If packages are missing and operator approves installation:
+
+  sudo apt update
+  sudo apt install -y qemu-kvm libvirt-daemon-system virt-manager ovmf bridge-utils qemu-utils libguestfs-tools virtinst
+
+
+Phase 2 - Safety Checks
+-----------------------
+Run:
+
+  virsh dominfo "${VM_NAME}" >/tmp/${VM_NAME}.dominfo 2>&1; echo $?
+  test -e "${BASE_DIR}/${VM_NAME}.qcow2"; echo $?
+
+Pass criteria:
+
+- virsh dominfo should fail if the VM does not already exist
+- disk path should not already exist
+
+If either exists, stop and ask whether to use a different VM_NAME or remove/reuse
+the existing lab VM.
+
+
+Phase 3 - Create Test Disk
+--------------------------
+Run:
+
+  qemu-img create -f qcow2 "${BASE_DIR}/${VM_NAME}.qcow2" 20G
+  qemu-img info "${BASE_DIR}/${VM_NAME}.qcow2"
+
+Pass criteria:
+
+- qcow2 file exists
+- virtual size is 20 GiB or chosen DISK_GB
+- format is qcow2
+
+
+Phase 4 - Create Or Install Test VM
+-----------------------------------
+Preferred hardware:
+
+- UEFI/OVMF
+- q35
+- 2 vCPU
+- 4096 MB RAM
+- VirtIO disk
+- VirtIO network
+- SPICE or serial console for local visibility
+
+Example virt-install using bridge br0 and an ISO:
+
+  virt-install \
+    --name "${VM_NAME}" \
+    --memory 4096 \
+    --vcpus 2 \
+    --machine q35 \
+    --boot uefi \
+    --disk path="${BASE_DIR}/${VM_NAME}.qcow2",format=qcow2,bus=virtio \
+    --network bridge=br0,model=virtio \
+    --graphics spice \
+    --cdrom /path/to/debian.iso
+
+Fallback NAT network example:
+
+  virt-install \
+    --name "${VM_NAME}" \
+    --memory 4096 \
+    --vcpus 2 \
+    --machine q35 \
+    --boot uefi \
+    --disk path="${BASE_DIR}/${VM_NAME}.qcow2",format=qcow2,bus=virtio \
+    --network network=default,model=virtio \
+    --graphics spice \
+    --cdrom /path/to/debian.iso
+
+Codex instruction:
+
+- Do not invent the ISO path. Locate one or ask the operator.
+- If using a cloud image instead of ISO install, document the exact image source
+  and cloud-init seed method.
+
+
+Phase 5 - Guest Preparation
+---------------------------
+Inside the Linux guest, install portability agents:
+
+  sudo apt update
+  sudo apt install -y qemu-guest-agent open-vm-tools cloud-init
+  sudo systemctl enable --now qemu-guest-agent
+  sudo systemctl enable --now open-vm-tools
+
+Collect guest evidence:
+
+  hostnamectl
+  uname -a
+  lsblk -f
+  ip addr
+  systemctl --no-pager status qemu-guest-agent open-vm-tools
+
+Pass criteria:
+
+- guest boots on KVM
+- qemu-guest-agent installed and active on KVM
+- open-vm-tools installed for later ESXi boot
+- disk is GPT/ext4 unless another filesystem was intentionally selected
+
+
+Phase 6 - Clean Shutdown And Freeze Point
+-----------------------------------------
+Shutdown:
+
+  virsh shutdown "${VM_NAME}"
+  sleep 10
+  virsh domstate "${VM_NAME}"
+
+If still running after a reasonable wait:
+
+  virsh domstate "${VM_NAME}"
+
+Stop and ask before using destroy. Do not force power off unless operator approves.
+
+Export libvirt XML:
+
+  virsh dumpxml "${VM_NAME}" > "${BASE_DIR}/${VM_NAME}-libvirt.xml"
+  cp "${BASE_DIR}/${VM_NAME}-libvirt.xml" "${EXPORT_DIR}/"
+
+Pass criteria:
+
+- VM state is shut off
+- libvirt XML exists in base directory and export directory
+
+
+Phase 7 - Copy Master qcow2 To Export Directory
+-----------------------------------------------
+Run:
+
+  cp --reflink=auto "${BASE_DIR}/${VM_NAME}.qcow2" "${EXPORT_DIR}/${VM_NAME}.qcow2"
+  qemu-img info "${EXPORT_DIR}/${VM_NAME}.qcow2" > "${EXPORT_DIR}/qcow2-info.txt"
+  sha256sum "${EXPORT_DIR}/${VM_NAME}.qcow2" > "${EXPORT_DIR}/SHA256SUMS"
+
+Pass criteria:
+
+- exported qcow2 exists
+- qemu-img info can read it
+- SHA256SUMS contains qcow2 hash
+
+
+Phase 8 - Convert qcow2 To VMDK
+-------------------------------
+Run:
+
+  qemu-img convert -p -f qcow2 -O vmdk "${EXPORT_DIR}/${VM_NAME}.qcow2" "${EXPORT_DIR}/${VM_NAME}.vmdk"
+  qemu-img info "${EXPORT_DIR}/${VM_NAME}.vmdk" > "${EXPORT_DIR}/vmdk-info.txt"
+  sha256sum "${EXPORT_DIR}/${VM_NAME}.vmdk" >> "${EXPORT_DIR}/SHA256SUMS"
+
+If ESXi later rejects this VMDK, repeat with an ESXi-compatible VMDK subformat
+appropriate to the local qemu-img version and ESXi version. Record the exact
+working command in notes.md.
+
+Pass criteria:
+
+- VMDK exists
+- qemu-img info can read it
+- SHA256SUMS contains VMDK hash
+
+
+Phase 9 - Create Evidence Notes
+-------------------------------
+Create:
+
+  ${EXPORT_DIR}/notes.md
+
+Required contents:
+
+- VM_NAME
+- host name and OS
+- exact ISO/cloud image used
+- VM disk path
+- network mode used
+- firmware mode
+- machine type
+- CPU/RAM/disk values
+- qemu-img version
+- qemu-img info summaries
+- SHA256SUMS contents
+- any deviations from this runbook
+- whether ESXi was contacted
+- next manual ESXi import steps
+
+Helpful command:
+
+  qemu-img --version >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/qcow2-info.txt" >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/vmdk-info.txt" >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/SHA256SUMS" >> "${EXPORT_DIR}/notes.md"
+
+
+Phase 10 - Optional Transfer To ESXi
+------------------------------------
+Do not perform this phase unless the operator explicitly supplies:
+
+- ESXi host/IP
+- datastore name
+- credentials or an approved authenticated method
+- target folder/path
+- whether to upload via datastore browser, scp, govc, or another tool
+
+Manual ESXi import recommendation:
+
+1. Upload VMDK and SHA256SUMS to a lab datastore.
+2. Create a new VM named vm-shuttle-test01-esxi.
+3. Choose Linux guest type matching the source distro.
+4. Select EFI firmware.
+5. Match or exceed CPU/RAM.
+6. Attach uploaded VMDK as boot disk.
+7. Start with a conservative virtual disk/network controller if needed.
+8. Power on and watch the console.
+9. Verify login prompt, disk visibility, network, and open-vm-tools.
+
+Do not delete or overwrite any ESXi VM as part of this simple test.
+
+
+Acceptance Criteria
+-------------------
+The test is successful when:
+
+- KVM host preflight passes.
+- A new lab VM boots on KVM.
+- The guest has qemu-guest-agent and open-vm-tools installed.
+- The guest is shut down cleanly before export.
+- qcow2 export copy exists.
+- VMDK conversion completes.
+- qemu-img info works for both qcow2 and VMDK.
+- SHA256SUMS exists for both exported disk files.
+- libvirt XML is captured.
+- notes.md describes the exact process and any deviations.
+- ESXi next-step import instructions are included.
+
+
+Final Codex Response Requirements
+---------------------------------
+When finished, Codex must report:
+
+- What was created.
+- Where the VM disk lives.
+- Where the export bundle lives.
+- Exact commands that failed, if any.
+- Whether the VM was shut down cleanly.
+- Whether ESXi was contacted.
+- The contents or path of SHA256SUMS.
+- The next recommended ESXi import step.
+
+Do not claim ESXi compatibility unless the VM has actually been imported and
+booted on ESXi.
+
+
+Troubleshooting Quick Reference
+-------------------------------
+Symptom: no KVM acceleration
+Likely cause: BIOS virtualization disabled or nested virtualization absent
+First action: stop and report CPU virtualization evidence
+
+Symptom: OVMF unavailable
+Likely cause: ovmf package missing
+First action: install ovmf if operator approves
+
+Symptom: bridge br0 missing
+Likely cause: host network not configured for bridge
+First action: use NAT only if operator approves, otherwise stop
+
+Symptom: VMDK rejected by ESXi
+Likely cause: VMDK subformat mismatch
+First action: record qemu-img info and retry conversion with compatible subformat
+
+Symptom: guest does not boot on ESXi
+Likely cause: EFI mismatch, controller mismatch, or bootloader issue
+First action: confirm EFI firmware and try conservative disk controller
+
+Symptom: no network on ESXi
+Likely cause: adapter model changed
+First action: try E1000E for first boot, then VMXNET3 after tools are active
+

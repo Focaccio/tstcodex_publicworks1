@@ -216,14 +216,37 @@ Codex instruction:
   and cloud-init seed method.
 
 
-Phase 5 - Guest Preparation
----------------------------
-Inside the Linux guest, install portability agents:
+Phase 5 - Guest Preparation And SSH Access
+------------------------------------------
+Inside the Linux guest, install portability agents and SSH access tooling:
 
   sudo apt update
-  sudo apt install -y qemu-guest-agent open-vm-tools cloud-init
+  sudo apt install -y qemu-guest-agent open-vm-tools cloud-init openssh-server
   sudo systemctl enable --now qemu-guest-agent
-  sudo systemctl enable --now open-vm-tools
+  sudo systemctl enable --now open-vm-tools || true
+  sudo mkdir -p /run/sshd
+  sudo install -d -m 0755 /etc/ssh/sshd_config.d
+  printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/99-codex-password-auth.conf
+  sudo sshd -t
+  sudo systemctl enable --now ssh
+
+For cloud-image based automated tests, include these items in cloud-init user-data:
+
+  packages:
+    - qemu-guest-agent
+    - open-vm-tools
+    - cloud-init
+    - openssh-server
+  runcmd:
+    - mkdir -p /run/sshd
+    - install -d -m 0755 /etc/ssh/sshd_config.d
+    - printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' > /etc/ssh/sshd_config.d/99-codex-password-auth.conf
+    - sshd -t
+    - systemctl enable --now ssh
+    - systemctl enable --now qemu-guest-agent
+    - systemctl enable --now open-vm-tools || true
+
+If SSH is repaired offline with virt-customize, do not write literal \n strings into sshd config. Use separate real lines or a here-doc. A bad one-line drop-in such as `PasswordAuthentication yes\nKbdInteractiveAuthentication yes` will make sshd fail to start.
 
 Collect guest evidence:
 
@@ -231,13 +254,16 @@ Collect guest evidence:
   uname -a
   lsblk -f
   ip addr
-  systemctl --no-pager status qemu-guest-agent open-vm-tools
+  systemctl --no-pager status ssh qemu-guest-agent open-vm-tools
+  ss -ltnp | grep ':22'
 
 Pass criteria:
 
 - guest boots on KVM
 - qemu-guest-agent installed and active on KVM
-- open-vm-tools installed for later ESXi boot
+- ssh service installed, active, and listening on TCP/22
+- login works with the expected lab user before calling the test complete
+- open-vm-tools installed for later ESXi boot; it may be inactive while running under KVM
 - disk is GPT/ext4 unless another filesystem was intentionally selected
 
 
@@ -363,6 +389,9 @@ The test is successful when:
 - KVM host preflight passes.
 - A new lab VM boots on KVM.
 - The guest has qemu-guest-agent and open-vm-tools installed.
+- The guest receives a LAN-visible IPv4 address when bridge br0 is selected.
+- The guest runs openssh-server, listens on TCP/22, and accepts login for the expected lab user.
+- IP parsing ignores loopback addresses and records the non-loopback guest interface address, for example enp1s0 on 192.168.86.0/24.
 - The guest is shut down cleanly before export.
 - qcow2 export copy exists.
 - VMDK conversion completes.
@@ -380,6 +409,8 @@ When finished, Codex must report:
 - What was created.
 - Where the VM disk lives.
 - Where the export bundle lives.
+- The VM LAN IP address, excluding loopback addresses.
+- Whether SSH is active and tested, including the login user.
 - Exact commands that failed, if any.
 - Whether the VM was shut down cleanly.
 - Whether ESXi was contacted.
@@ -415,4 +446,12 @@ First action: confirm EFI firmware and try conservative disk controller
 Symptom: no network on ESXi
 Likely cause: adapter model changed
 First action: try E1000E for first boot, then VMXNET3 after tools are active
+
+Symptom: SSH connection refused after a successful VM boot
+Likely cause: openssh-server is missing, ssh.service failed, /run/sshd is missing, or sshd_config.d contains an invalid drop-in
+First action: use qemu guest agent or virt-customize to install openssh-server, create /run/sshd, validate with sshd -t, restart ssh, and verify TCP/22
+
+Symptom: test reports guest IP as 127.0.0.1 even though LAN networking works
+Likely cause: parser selected the loopback entry from virsh domifaddr before the real interface
+First action: filter out 127.0.0.0/8 and require the non-loopback LAN interface address, for example 192.168.86.x on enp1s0
 

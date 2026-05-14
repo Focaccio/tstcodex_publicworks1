@@ -379,3 +379,29 @@ This provides:
 - Easier backups
 - Lower operational complexity
 - Long-term maintainability
+
+SSH Access Lessons From Test 1 - 2026-05-14
+-------------------------------------------
+For future VM shuttle tests, SSH access is a required end-of-test validation, not an optional convenience. The VM must run openssh-server, listen on TCP/22, and accept login for the expected lab user before the test is considered functionally complete.
+
+Required guest-side actions:
+
+  sudo apt update
+  sudo apt install -y openssh-server qemu-guest-agent open-vm-tools cloud-init
+  sudo mkdir -p /run/sshd
+  sudo install -d -m 0755 /etc/ssh/sshd_config.d
+  printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/99-codex-password-auth.conf
+  sudo sshd -t
+  sudo systemctl enable --now ssh qemu-guest-agent
+  sudo systemctl enable --now open-vm-tools || true
+
+Required validation before shutdown/export:
+
+  virsh domifaddr VM_NAME --source agent
+  # Ignore loopback addresses such as 127.0.0.1. Record the LAN address, for example 192.168.86.x.
+  ping -c 3 VM_LAN_IP
+  nc -vz -w 2 VM_LAN_IP 22
+  ssh greg@VM_LAN_IP 'hostname; ip -br addr; id; systemctl is-active ssh qemu-guest-agent open-vm-tools'
+
+If SSH fails after an offline edit, check for malformed sshd drop-ins. A literal string like `yes\nKbdInteractiveAuthentication` in one line is invalid. The file must contain two real lines.
+

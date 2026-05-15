@@ -42,3 +42,15 @@ The first SSH repair attempt wrote a literal `\n` into `/etc/ssh/sshd_config.d/9
 ## IP parsing requirement
 
 When parsing `virsh domifaddr`, do not accept loopback addresses. The successful bridged test showed the VM on `enp1s0` with `192.168.86.49/24`; the harness initially selected `127.0.0.1` and logged a false failure.
+
+## Host Precheck Update - 2026-05-15
+
+The updated workflow needs `sshpass` for automated SSH login validation and `nmap` for LAN discovery/port checks. These were missing during the 2026-05-15 precheck on kg55 and were installed. Future prechecks should fail hard if either command is missing.
+
+```bash
+sudo apt update
+sudo apt install -y sshpass nmap
+command -v sshpass nmap
+```
+
+If a prior test VM is still defined, use a new test name such as `vm-shuttle-test02` for the next run. Existing exported VMDKs are point-in-time artifacts; regenerate the VMDK after SSH fixes are applied if that export will be used for the final access test.

@@ -455,3 +455,30 @@ Symptom: test reports guest IP as 127.0.0.1 even though LAN networking works
 Likely cause: parser selected the loopback entry from virsh domifaddr before the real interface
 First action: filter out 127.0.0.0/8 and require the non-loopback LAN interface address, for example 192.168.86.x on enp1s0
 
+## Precheck Update - 2026-05-15
+
+Before rerunning the workflow, confirm the host has every validation tool required by the SSH-access changes. The precheck on kg55 found `sshpass` and `nmap` missing; both were installed and are now required prerequisites for future tests.
+
+Required host validation tools:
+
+```bash
+sudo apt update
+sudo apt install -y sshpass nmap
+command -v sshpass nmap virsh virt-install qemu-img virt-customize cloud-localds nc ip bridge brctl sha256sum curl git
+```
+
+Clean retest guidance:
+
+- If `vm-shuttle-test01` is still defined or running, do not reuse that name for a clean retest. Use `vm-shuttle-test02`, or intentionally shut down/archive/remove the prior VM and its `/srv/vms/vm-shuttle-test01` directory first.
+- Existing VMDK exports do not automatically receive live guest fixes made after export time. If SSH was repaired after a VMDK was created, shut down the VM and regenerate the VMDK from the corrected disk before treating the export as final.
+- The precheck should pass with no hard failures before starting the next workflow test. Warnings about preserved prior evidence are acceptable only when the next test uses a new VM name.
+
+Known-good precheck state from 2026-05-15:
+
+- `libvirtd` and `virtlogd` active.
+- `/dev/kvm` present and KVM modules loaded.
+- `br0` up, enslaving `enp5s0f0`, with no host IPv4 address.
+- Default gateway `192.168.86.1` reachable.
+- Binder1 `192.168.86.33` reachable.
+- Debian cloud image present at `/srv/isos/debian-stable-genericcloud-amd64.qcow2`.
+- Required validation tools `sshpass` and `nmap` installed.

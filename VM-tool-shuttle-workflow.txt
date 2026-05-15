@@ -405,3 +405,16 @@ Required validation before shutdown/export:
 
 If SSH fails after an offline edit, check for malformed sshd drop-ins. A literal string like `yes\nKbdInteractiveAuthentication` in one line is invalid. The file must contain two real lines.
 
+## Precheck Update - 2026-05-15
+
+The SSH-access workflow requires host-side validation tools in addition to the KVM/libvirt build tools. On kg55, the precheck found `sshpass` and `nmap` missing; they were installed and should be considered required for future VM shuttle runs.
+
+Install/check prerequisites:
+
+```bash
+sudo apt update
+sudo apt install -y sshpass nmap
+command -v sshpass nmap virsh virt-install qemu-img virt-customize cloud-localds nc ip bridge brctl sha256sum curl git
+```
+
+For a clean second test, use a new VM name such as `vm-shuttle-test02` if `vm-shuttle-test01` is still defined or `/srv/vms/vm-shuttle-test01` still exists. Do not assume an old VMDK contains post-export SSH repairs; regenerate the VMDK from the corrected VM disk after shutdown when those fixes matter.

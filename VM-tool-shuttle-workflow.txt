@@ -422,3 +422,7 @@ For a clean second test, use a new VM name such as `vm-shuttle-test02` if `vm-sh
 ## Test 2 Cloud-Init Correction - 2026-05-15
 
 Do not include `cloud-init status --wait` inside cloud-init `runcmd`; it waits on the same final stage that is executing it. For VM shuttle tests, run `cloud-init status --long` or `cloud-init status --wait` only from an external SSH validation command after the guest is reachable.
+
+## Root Password For Lab `su -` - 2026-05-15
+
+If a test VM must allow `su -`, cloud-init must set the root password explicitly. `su -` uses the root password, not the greg user password. For this lab workflow, set root to the same temporary lab password as greg in cloud-init `chpasswd`, then validate over SSH before export. Do not use this shared-password pattern for production.

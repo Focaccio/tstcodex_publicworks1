@@ -58,3 +58,7 @@ If a prior test VM is still defined, use a new test name such as `vm-shuttle-tes
 ## Cloud-Init Self-Wait Correction - 2026-05-15
 
 Do not place `cloud-init status --wait` inside cloud-init `runcmd`. It can self-wait during final stage. Keep guest `runcmd` limited to service setup, then validate cloud-init from the host over SSH after TCP/22 is reachable.
+
+## Root `su -` Validation - 2026-05-15
+
+For lab VMs where `su -` is expected, add root to cloud-init `chpasswd` with the same temporary lab password as greg and validate it before shutdown/export. `sudo` access alone does not make `su -` work; `su -` requires the root account password.

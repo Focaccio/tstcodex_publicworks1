@@ -507,3 +507,31 @@ ssh greg@VM_LAN_IP 'cloud-init status --long || true; sudo sshd -t; systemctl is
 ```
 
 The `vm-shuttle-test02` export succeeded after clearing the self-wait. SSH login, `sshd -t`, qemu-guest-agent, clean shutdown, QCOW2 export, VMDK conversion, and checksums all passed.
+
+## Root Password And `su -` Update - 2026-05-15
+
+For lab test VMs where the operator expects `su -` to work, cloud-init must set a root password. `su -` asks for the root account password, not the invoking user's password. For this workflow, set root to the same temporary lab password as user `greg` unless the operator specifies a different password.
+
+Cloud-init user-data should include both users in `chpasswd`:
+
+```yaml
+disable_root: false
+ssh_pwauth: true
+chpasswd:
+  expire: false
+  users:
+    - name: greg
+      password: LAB_PASSWORD
+      type: text
+    - name: root
+      password: LAB_PASSWORD
+      type: text
+```
+
+Validation before export:
+
+```bash
+ssh greg@VM_LAN_IP 'printf "%s\n" "LAB_PASSWORD" | su - root -c "id; hostname"'
+```
+
+This is a lab convenience setting. Do not reuse the shared root password pattern for production systems or any VM that will be exposed outside the trusted lab network.

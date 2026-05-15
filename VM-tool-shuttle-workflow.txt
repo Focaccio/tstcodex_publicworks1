@@ -418,3 +418,7 @@ command -v sshpass nmap virsh virt-install qemu-img virt-customize cloud-localds
 ```
 
 For a clean second test, use a new VM name such as `vm-shuttle-test02` if `vm-shuttle-test01` is still defined or `/srv/vms/vm-shuttle-test01` still exists. Do not assume an old VMDK contains post-export SSH repairs; regenerate the VMDK from the corrected VM disk after shutdown when those fixes matter.
+
+## Test 2 Cloud-Init Correction - 2026-05-15
+
+Do not include `cloud-init status --wait` inside cloud-init `runcmd`; it waits on the same final stage that is executing it. For VM shuttle tests, run `cloud-init status --long` or `cloud-init status --wait` only from an external SSH validation command after the guest is reachable.

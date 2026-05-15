@@ -54,3 +54,7 @@ command -v sshpass nmap
 ```
 
 If a prior test VM is still defined, use a new test name such as `vm-shuttle-test02` for the next run. Existing exported VMDKs are point-in-time artifacts; regenerate the VMDK after SSH fixes are applied if that export will be used for the final access test.
+
+## Cloud-Init Self-Wait Correction - 2026-05-15
+
+Do not place `cloud-init status --wait` inside cloud-init `runcmd`. It can self-wait during final stage. Keep guest `runcmd` limited to service setup, then validate cloud-init from the host over SSH after TCP/22 is reachable.

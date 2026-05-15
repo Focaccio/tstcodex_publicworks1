@@ -482,3 +482,28 @@ Known-good precheck state from 2026-05-15:
 - Binder1 `192.168.86.33` reachable.
 - Debian cloud image present at `/srv/isos/debian-stable-genericcloud-amd64.qcow2`.
 - Required validation tools `sshpass` and `nmap` installed.
+
+## Test 2 Update - 2026-05-15
+
+During `vm-shuttle-test02`, the cloud-init `runcmd` example self-waited because it ran `cloud-init status --wait` from inside cloud-init final stage. Do not put `cloud-init status --wait` inside guest `runcmd`. Run it only from the host after SSH is reachable, or from an external validation SSH session.
+
+Correct guest `runcmd` pattern:
+
+```yaml
+runcmd:
+  - mkdir -p /run/sshd
+  - install -d -m 0755 /etc/ssh/sshd_config.d
+  - printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' > /etc/ssh/sshd_config.d/99-codex-password-auth.conf
+  - sshd -t
+  - systemctl enable --now ssh
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now open-vm-tools || true
+```
+
+Correct external validation pattern:
+
+```bash
+ssh greg@VM_LAN_IP 'cloud-init status --long || true; sudo sshd -t; systemctl is-active ssh qemu-guest-agent open-vm-tools || true'
+```
+
+The `vm-shuttle-test02` export succeeded after clearing the self-wait. SSH login, `sshd -t`, qemu-guest-agent, clean shutdown, QCOW2 export, VMDK conversion, and checksums all passed.

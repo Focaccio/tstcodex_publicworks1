@@ -504,6 +504,7 @@ Correct external validation pattern:
 
 ```bash
 ssh greg@VM_LAN_IP 'cloud-init status --long || true; sudo sshd -t; systemctl is-active ssh qemu-guest-agent open-vm-tools || true'
+# Do not put cloud-init wait commands in the guest runcmd/final-stage command list.
 ```
 
 The `vm-shuttle-test02` export succeeded after clearing the self-wait. SSH login, `sshd -t`, qemu-guest-agent, clean shutdown, QCOW2 export, VMDK conversion, and checksums all passed.

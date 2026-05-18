@@ -1,0 +1,580 @@
+VM TOOL SHUTTLE WORKFLOW - SECTIONED VERIFICATION RUNBOOK
+=========================================================
+
+Purpose
+-------
+Create a repeatable workflow for building a portable AMD64/x86_64 Linux VM on
+kg55 with KVM/libvirt, validating LAN SSH access, shutting it down cleanly, and
+exporting disk artifacts for later ESXi import testing.
+
+Source Documents
+----------------
+This document consolidates the most recent workflow guidance from:
+
+- VM-tool-shuttle-workflow-codex-test-runbook.txt
+- VM-tool-shuttle-workflow-ssh-access-update-20260514.md
+- VM-tool-shuttle-workflow.txt
+
+Operating Rules
+---------------
+- Do not touch production VMs.
+- Do not overwrite existing VM disks.
+- Do not contact ESXi unless the operator explicitly supplies ESXi target details.
+- Do not claim ESXi compatibility until the VM has actually booted on ESXi.
+- Stop and report if a hard-stop condition is found.
+
+Default Test Values
+-------------------
+VM_NAME: vm-shuttle-testNN
+GUEST_OS: Debian stable minimal server
+ARCH: amd64 / x86_64
+FIRMWARE: UEFI / OVMF
+MACHINE_TYPE: q35
+VCPU: 2
+RAM_MB: 4096
+DISK_GB: 20
+SOURCE_DISK_FORMAT: qcow2
+EXPORT_DISK_FORMAT: vmdk
+KVM_DISK_BUS: virtio
+KVM_NETWORK_MODEL: virtio
+NETWORK_MODE: bridge br0 preferred
+FILESYSTEM: ext4
+LAB_USER: greg
+ROOT_PASSWORD_POLICY: root password should match greg for lab test VMs where `su -` is expected
+
+Hard Stop Conditions
+--------------------
+Stop before making changes if any condition is true:
+
+- CPU virtualization support is absent.
+- libvirt/KVM commands are unavailable.
+- OVMF/UEFI firmware is unavailable.
+- Free disk space is less than the VM disk plus 2x export working room.
+- VM_NAME already exists and reuse/removal has not been approved.
+- Target VM disk path already exists and reuse/removal has not been approved.
+- No ISO or cloud image source is available.
+- The selected bridge does not exist and NAT fallback is not approved.
+- Any command would modify an unrelated existing VM.
+- ESXi upload/import is requested but ESXi details or credentials are missing.
+
+
+SECTION 1 - Confirm Inputs And Scope
+====================================
+
+Steps
+-----
+1. Confirm the VM name to create.
+2. Confirm whether this is a clean test or a continuation of an existing test.
+3. Confirm the Debian image source: ISO or cloud image.
+4. Confirm the VM storage path.
+5. Confirm the network mode. Prefer bridge `br0` for LAN-visible VMs.
+6. Confirm that ESXi import is out of scope unless target details are provided.
+
+Example values:
+
+  VM_NAME=vm-shuttle-test03
+  BASE_DIR=/srv/vms/${VM_NAME}
+  RUN_ID=$(date +%Y%m%d-%H%M)
+  EXPORT_DIR=${BASE_DIR}/exports/${RUN_ID}
+  IMAGE=/srv/isos/debian-stable-genericcloud-amd64.qcow2
+  BRIDGE=br0
+
+Section Verification
+--------------------
+- VM_NAME is unique for this run or cleanup/reuse was approved.
+- IMAGE points to a real Debian amd64 image or ISO.
+- BASE_DIR and EXPORT_DIR are known.
+- Network decision is recorded as bridge or approved NAT fallback.
+- ESXi contact is explicitly marked yes/no.
+
+
+SECTION 2 - Host Preflight
+==========================
+
+Steps
+-----
+1. Check kg55 identity and kernel.
+
+  hostnamectl
+  uname -a
+
+2. Check virtualization support.
+
+  egrep -c '(vmx|svm)' /proc/cpuinfo
+  test -e /dev/kvm && ls -l /dev/kvm
+
+3. Check required virtualization tools.
+
+  command -v virsh virt-install qemu-img virt-customize cloud-localds
+  command -v sshpass nmap nc ip bridge brctl sha256sum curl git
+
+4. Check libvirt services and current VM inventory.
+
+  systemctl status libvirtd --no-pager || true
+  virsh list --all
+  virsh net-list --all
+
+5. Check OVMF/UEFI firmware availability.
+
+  ls /usr/share/OVMF /usr/share/ovmf 2>/dev/null || true
+
+6. Check free disk space.
+
+  df -h /srv /var/lib/libvirt/images "$HOME" 2>/dev/null
+
+7. Install missing host packages only if approved.
+
+  sudo apt update
+  sudo apt install -y qemu-kvm libvirt-daemon-system virt-manager ovmf bridge-utils qemu-utils libguestfs-tools virtinst sshpass nmap
+
+Section Verification
+--------------------
+- Virtualization count is 1 or greater.
+- /dev/kvm exists.
+- virsh, virt-install, qemu-img, virt-customize, cloud-localds, sshpass, and nmap exist.
+- libvirt is active or socket-activated.
+- OVMF firmware files exist.
+- Disk space is sufficient for qcow2 plus export copy plus VMDK.
+
+
+SECTION 3 - Network Preflight
+=============================
+
+Steps
+-----
+1. Confirm bridge state.
+
+  ip -br link show br0
+  bridge link show
+  brctl show br0 2>/dev/null || true
+
+2. Confirm LAN reachability from kg55.
+
+  ip route
+  ping -c 3 192.168.86.1
+  ping -c 3 192.168.86.33
+
+3. Confirm the bridge is suitable for a LAN-visible guest.
+
+  ip -br addr show br0
+  ip -br addr show enp5s0f0 enp4s0f1 2>/dev/null || true
+
+4. If bridge `br0` is missing or unsuitable, stop and ask whether to configure it
+   or use NAT for a limited local-only test.
+
+Section Verification
+--------------------
+- br0 exists and is up for LAN-visible tests.
+- A physical interface is enslaved to br0 when required.
+- Default gateway 192.168.86.1 responds.
+- binder1 192.168.86.33 responds.
+- The selected network mode is recorded.
+
+
+SECTION 4 - Safety Checks And Working Directories
+=================================================
+
+Steps
+-----
+1. Export working variables.
+
+  VM_NAME=vm-shuttle-test03
+  BASE_DIR=/srv/vms/${VM_NAME}
+  RUN_ID=$(date +%Y%m%d-%H%M)
+  EXPORT_DIR=${BASE_DIR}/exports/${RUN_ID}
+
+2. Confirm the VM does not already exist.
+
+  virsh dominfo "${VM_NAME}" >/tmp/${VM_NAME}.dominfo 2>&1; echo $?
+
+3. Confirm the disk path does not already exist.
+
+  test -e "${BASE_DIR}/${VM_NAME}.qcow2"; echo $?
+
+4. Create working directories.
+
+  sudo mkdir -p "${BASE_DIR}/logs" "${EXPORT_DIR}"
+  sudo chown -R "$USER":"$USER" "${BASE_DIR}"
+
+Section Verification
+--------------------
+- virsh dominfo fails for a new VM unless reuse was approved.
+- No unapproved existing disk path is present.
+- BASE_DIR exists.
+- EXPORT_DIR exists.
+- Current user can write to BASE_DIR and EXPORT_DIR.
+
+
+SECTION 5 - Build Or Prepare The Guest Disk
+===========================================
+
+Steps
+-----
+Option A: ISO install path.
+
+1. Create a fresh qcow2 disk.
+
+  qemu-img create -f qcow2 "${BASE_DIR}/${VM_NAME}.qcow2" 20G
+  qemu-img info "${BASE_DIR}/${VM_NAME}.qcow2"
+
+2. Install from ISO with bridge networking.
+
+  virt-install \
+    --name "${VM_NAME}" \
+    --memory 4096 \
+    --vcpus 2 \
+    --machine q35 \
+    --boot uefi \
+    --disk path="${BASE_DIR}/${VM_NAME}.qcow2",format=qcow2,bus=virtio \
+    --network bridge=br0,model=virtio \
+    --graphics spice \
+    --cdrom /path/to/debian.iso
+
+Option B: Debian cloud image path.
+
+1. Copy the cloud image into the VM directory.
+
+  cp --reflink=auto "${IMAGE}" "${BASE_DIR}/${VM_NAME}.qcow2"
+  qemu-img resize "${BASE_DIR}/${VM_NAME}.qcow2" 20G
+
+2. Create cloud-init seed data that sets user access, SSH, guest agents, and root
+   password for lab `su -` testing.
+
+  cat > "${BASE_DIR}/user-data" <<'YAML'
+#cloud-config
+hostname: VM_HOSTNAME
+manage_etc_hosts: true
+ssh_pwauth: true
+disable_root: false
+users:
+  - default
+  - name: greg
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+chpasswd:
+  expire: false
+  users:
+    - name: greg
+      password: LAB_PASSWORD
+      type: text
+    - name: root
+      password: LAB_PASSWORD
+      type: text
+packages:
+  - qemu-guest-agent
+  - open-vm-tools
+  - cloud-init
+  - openssh-server
+runcmd:
+  - mkdir -p /run/sshd
+  - install -d -m 0755 /etc/ssh/sshd_config.d
+  - printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' > /etc/ssh/sshd_config.d/99-codex-password-auth.conf
+  - sshd -t
+  - systemctl enable --now ssh
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now open-vm-tools || true
+YAML
+
+  cat > "${BASE_DIR}/meta-data" <<EOF_META
+instance-id: ${VM_NAME}
+local-hostname: ${VM_NAME}
+EOF_META
+
+  cloud-localds "${BASE_DIR}/${VM_NAME}-seed.iso" "${BASE_DIR}/user-data" "${BASE_DIR}/meta-data"
+
+3. Define/start the VM using virt-install import mode.
+
+  virt-install \
+    --name "${VM_NAME}" \
+    --memory 4096 \
+    --vcpus 2 \
+    --machine q35 \
+    --boot uefi \
+    --disk path="${BASE_DIR}/${VM_NAME}.qcow2",format=qcow2,bus=virtio \
+    --disk path="${BASE_DIR}/${VM_NAME}-seed.iso",device=cdrom \
+    --network bridge=br0,model=virtio \
+    --graphics spice \
+    --import
+
+Important cloud-init rule:
+Do not put `cloud-init status --wait` inside guest runcmd. That can wait on the
+same final stage that is executing it. Run cloud-init validation later from the
+host over SSH.
+
+Section Verification
+--------------------
+- qcow2 exists and qemu-img can read it.
+- Virtual size is the expected DISK_GB.
+- VM is defined in libvirt.
+- VM boots on KVM.
+- If cloud-init is used, seed ISO exists and user-data includes greg, root, ssh, qemu-guest-agent, and open-vm-tools setup.
+
+
+SECTION 6 - Guest SSH And Agent Validation
+==========================================
+
+Steps
+-----
+1. Wait for a non-loopback guest IP from qemu guest agent or network discovery.
+
+  virsh domifaddr "${VM_NAME}" --source agent || true
+  virsh domifaddr "${VM_NAME}" --source lease || true
+  nmap -p 22 192.168.86.0/24 --open
+
+2. Do not accept 127.0.0.0/8 as the guest IP. Record the LAN address, for example
+   192.168.86.x on enp1s0.
+
+3. Test basic LAN reachability.
+
+  ping -c 3 VM_LAN_IP
+  nc -vz -w 2 VM_LAN_IP 22
+
+4. Test SSH login and services.
+
+  sshpass -p 'LAB_PASSWORD' ssh -o StrictHostKeyChecking=no greg@VM_LAN_IP 'hostname; ip -br addr; id; systemctl is-active ssh qemu-guest-agent open-vm-tools || true'
+
+5. Validate cloud-init externally, not from runcmd.
+
+  sshpass -p 'LAB_PASSWORD' ssh greg@VM_LAN_IP 'cloud-init status --long || true; sudo sshd -t; systemctl is-active ssh qemu-guest-agent open-vm-tools || true'
+
+6. Validate root `su -` if required by the test.
+
+  sshpass -p 'LAB_PASSWORD' ssh greg@VM_LAN_IP 'printf "%s\n" "LAB_PASSWORD" | su - root -c "id; hostname"'
+
+Section Verification
+--------------------
+- Guest has a non-loopback LAN IP.
+- Guest responds to ping.
+- TCP/22 is open.
+- SSH login works for greg.
+- sshd -t passes.
+- ssh service is active.
+- qemu-guest-agent is active under KVM.
+- open-vm-tools is installed; it may be inactive while running under KVM.
+- `su -` to root works when this lab requirement is in scope.
+
+
+SECTION 7 - Guest Evidence Capture
+==================================
+
+Steps
+-----
+1. Capture guest system evidence over SSH.
+
+  sshpass -p 'LAB_PASSWORD' ssh greg@VM_LAN_IP 'hostnamectl; uname -a; lsblk -f; ip addr; ss -ltnp | grep :22 || true; systemctl --no-pager status ssh qemu-guest-agent open-vm-tools || true' | tee "${BASE_DIR}/logs/guest-evidence.txt"
+
+2. Capture host-side VM evidence.
+
+  virsh dominfo "${VM_NAME}" | tee "${BASE_DIR}/logs/dominfo.txt"
+  virsh dumpxml "${VM_NAME}" | tee "${BASE_DIR}/${VM_NAME}-libvirt.xml" >/dev/null
+
+Section Verification
+--------------------
+- guest-evidence.txt exists and includes hostname, kernel, disk, IP, SSH, and agent status.
+- dominfo.txt exists.
+- libvirt XML exists in BASE_DIR.
+- Guest LAN IP is recorded in the evidence.
+
+
+SECTION 8 - Clean Shutdown And Freeze Point
+===========================================
+
+Steps
+-----
+1. Shut down cleanly.
+
+  virsh shutdown "${VM_NAME}"
+  sleep 10
+  virsh domstate "${VM_NAME}"
+
+2. Wait a reasonable period if still running.
+
+  sleep 20
+  virsh domstate "${VM_NAME}"
+
+3. Stop and ask before using `virsh destroy`. Do not force power off unless the
+   operator approves.
+
+4. Copy libvirt XML into the export directory.
+
+  cp "${BASE_DIR}/${VM_NAME}-libvirt.xml" "${EXPORT_DIR}/"
+
+Section Verification
+--------------------
+- VM state is shut off.
+- No force power-off was used unless approved and documented.
+- libvirt XML exists in BASE_DIR and EXPORT_DIR.
+- The disk is frozen after guest SSH and root-access validation, so exported artifacts include the access fixes.
+
+
+SECTION 9 - Export qcow2 And Convert To VMDK
+============================================
+
+Steps
+-----
+1. Copy the frozen qcow2 into the export directory.
+
+  cp --reflink=auto "${BASE_DIR}/${VM_NAME}.qcow2" "${EXPORT_DIR}/${VM_NAME}.qcow2"
+  qemu-img info "${EXPORT_DIR}/${VM_NAME}.qcow2" > "${EXPORT_DIR}/qcow2-info.txt"
+  sha256sum "${EXPORT_DIR}/${VM_NAME}.qcow2" > "${EXPORT_DIR}/SHA256SUMS"
+
+2. Convert qcow2 to VMDK.
+
+  qemu-img convert -p -f qcow2 -O vmdk "${EXPORT_DIR}/${VM_NAME}.qcow2" "${EXPORT_DIR}/${VM_NAME}.vmdk"
+  qemu-img info "${EXPORT_DIR}/${VM_NAME}.vmdk" > "${EXPORT_DIR}/vmdk-info.txt"
+  sha256sum "${EXPORT_DIR}/${VM_NAME}.vmdk" >> "${EXPORT_DIR}/SHA256SUMS"
+
+3. If ESXi rejects the VMDK later, repeat conversion with an ESXi-compatible VMDK
+   subformat appropriate to the qemu-img and ESXi versions, then record the exact
+   working command.
+
+Section Verification
+--------------------
+- Exported qcow2 exists.
+- qcow2-info.txt exists and shows readable qcow2 metadata.
+- VMDK exists.
+- vmdk-info.txt exists and shows readable VMDK metadata.
+- SHA256SUMS includes hashes for both exported disk files.
+
+
+SECTION 10 - Create Evidence Bundle Notes
+=========================================
+
+Steps
+-----
+1. Create notes.md in the export directory.
+
+  cat > "${EXPORT_DIR}/notes.md" <<EOF_NOTES
+# ${VM_NAME} VM Shuttle Export Notes
+
+VM_NAME: ${VM_NAME}
+Source host: $(hostname -f 2>/dev/null || hostname)
+Run ID: ${RUN_ID}
+Network mode: bridge br0 preferred
+ESXi contacted: no
+
+## Required Review Items
+- Exact image source used
+- VM disk path
+- Firmware mode
+- Machine type
+- CPU/RAM/disk values
+- Guest LAN IP
+- SSH validation result
+- Root su validation result
+- qemu-img version
+- Deviations from runbook
+EOF_NOTES
+
+2. Append tool and disk evidence.
+
+  qemu-img --version >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/qcow2-info.txt" >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/vmdk-info.txt" >> "${EXPORT_DIR}/notes.md"
+  cat "${EXPORT_DIR}/SHA256SUMS" >> "${EXPORT_DIR}/notes.md"
+
+3. Copy logs into export directory if useful.
+
+  cp -a "${BASE_DIR}/logs" "${EXPORT_DIR}/"
+
+Section Verification
+--------------------
+- notes.md exists.
+- notes.md records ESXi contacted: no, unless the operator explicitly approved ESXi work.
+- notes.md contains qemu-img version, disk info, and checksums.
+- logs are present in the export bundle or their location is recorded.
+
+
+SECTION 11 - Optional ESXi Transfer Or Import
+============================================
+
+Steps
+-----
+Do not perform this section unless the operator explicitly supplies:
+
+- ESXi host/IP
+- Datastore name
+- Credentials or approved authenticated method
+- Target folder/path
+- Upload/import method
+
+Manual import recommendation:
+
+1. Upload VMDK and SHA256SUMS to a lab datastore.
+2. Create a new VM named with an ESXi-specific suffix.
+3. Choose Linux guest type matching the source distro.
+4. Select EFI firmware.
+5. Match or exceed CPU/RAM.
+6. Attach uploaded VMDK as the boot disk.
+7. Use a conservative virtual disk/network controller if first boot fails.
+8. Power on and watch the console.
+9. Verify login prompt, disk visibility, network, SSH, and open-vm-tools.
+
+Section Verification
+--------------------
+- ESXi work was explicitly approved before any contact.
+- No existing ESXi VM was deleted or overwritten.
+- Import method and datastore are recorded.
+- ESXi boot is verified before claiming ESXi compatibility.
+
+
+SECTION 12 - Final Reporting Requirements
+=========================================
+
+Steps
+-----
+At the end of a run, report:
+
+- What was created.
+- Where the VM disk lives.
+- Where the export bundle lives.
+- The VM LAN IP address, excluding loopback addresses.
+- Whether SSH is active and tested, including login user.
+- Whether `su -` to root was tested and passed when required.
+- Exact failed commands, if any.
+- Whether the VM was shut down cleanly.
+- Whether ESXi was contacted.
+- The path to SHA256SUMS.
+- The next recommended ESXi import step.
+
+Section Verification
+--------------------
+- Final response includes all required reporting fields.
+- Any failed or skipped validation is called out plainly.
+- No compatibility claim is made beyond what was actually tested.
+
+
+Troubleshooting Quick Reference
+===============================
+
+No KVM acceleration:
+- Check BIOS virtualization or nested virtualization.
+- Stop and report CPU virtualization evidence.
+
+OVMF unavailable:
+- Install `ovmf` if approved.
+
+Bridge br0 missing:
+- Stop for LAN-visible tests unless NAT fallback is approved.
+
+VMDK rejected by ESXi:
+- Record qemu-img info and retry with compatible VMDK subformat.
+
+Guest does not boot on ESXi:
+- Confirm EFI firmware and try conservative disk controller settings.
+
+No network on ESXi:
+- Try E1000E for first boot, then VMXNET3 after tools are active.
+
+SSH connection refused:
+- Check openssh-server, ssh.service, /run/sshd, and sshd_config.d syntax.
+- Ensure the SSH drop-in contains real newlines, not literal \n text.
+
+Guest IP parsed as 127.0.0.1:
+- Filter loopback addresses and require the non-loopback LAN interface address.
+
+Cloud-init appears stuck:
+- Confirm `cloud-init status --wait` was not placed in runcmd.
+- Validate cloud-init externally over SSH after TCP/22 is reachable.
